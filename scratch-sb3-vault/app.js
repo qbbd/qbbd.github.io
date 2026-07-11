@@ -306,3 +306,4 @@ async function autoPlayFromUrl() {
   await loadProjects();
   await autoPlayFromUrl();
 })();
+console.log(session.info)
