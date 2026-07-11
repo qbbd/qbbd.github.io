@@ -280,7 +280,7 @@ function playProject(projectId, title, sb3Url) {
   playerTitle.textContent = title || "再生中";
   playerId.textContent = projectId;
   // TurboWarp: https://turbowarp.org/?project_url=<CORS対応の直リンク>
-  const src = `https://turbowarp.org/?project_url=${encodeURIComponent(sb3Url)}`;
+  const src = `https://turbowarp.org/embed?project_url=${encodeURIComponent(sb3Url)}`;
   twFrame.src = src;
   playerPanel.hidden = false;
   playerPanel.scrollIntoView({ behavior: "smooth" });
