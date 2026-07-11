@@ -1,0 +1,23 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<title>Redirecting...</title>
+<script>
+  // GitHub Pages SPA トリック (based on rafgraph/spa-github-pages)
+  // 存在しないパス・クエリでアクセスされた場合でも index.html に復元して渡す
+  var segmentCount = 0; // リポジトリのルート直下で公開している場合は 0 のまま
+  var l = window.location;
+  l.replace(
+    l.protocol + "//" + l.hostname + (l.port ? ":" + l.port : "") +
+    l.pathname.split("/").slice(0, 1 + segmentCount).join("/") + "/?/" +
+    l.pathname.slice(1).split("/").slice(segmentCount).join("/").replace(/&/g, "~and~") +
+    (l.search ? "&" + l.search.slice(1).replace(/&/g, "~and~") : "") +
+    l.hash
+  );
+</script>
+</head>
+<body>
+  <p>ページを読み込んでいます... 自動で戻らない場合は <a href="./">こちら</a> をクリックしてください。</p>
+</body>
+</html>

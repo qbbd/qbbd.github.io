@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html lang="ja">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0">
+<title>Scratch sb3 Vault — Solid × Nostr × TurboWarp</title>
+<link rel="stylesheet" href="./style.css">
+<script>
+  // GitHub Pages SPA 404トリック (rafgraph/spa-github-pages 方式)
+  // 404.htmlで "?/実際のパス" にエンコードされたURLを、本来の形に戻す
+  (function (l) {
+    if (l.search[1] === "/") {
+      var decoded = l.search
+        .slice(1)
+        .split("&")
+        .map(function (s) {
+          return s.replace(/~and~/g, "&");
+        })
+        .join("?");
+      history.replaceState(
+        null,
+        null,
+        l.pathname.slice(0, -1) + decoded + l.hash
+      );
+    }
+  })(window.location);
+</script>
+</head>
+<body>
+  <header class="topbar">
+    <h1>🧵 Scratch sb3 Vault</h1>
+    <div id="authArea" class="authArea">
+      <button id="loginBtn">Solid Podでログイン</button>
+      <span id="whoami" class="whoami"></span>
+    </div>
+  </header>
+
+  <main>
+    <section class="panel" id="uploadPanel">
+      <h2>1. .sb3をPodに保存 → Nostrで公開</h2>
+      <p class="hint">Podにログイン後、sb3ファイルを選んでアップロードすると、Pod上に保存され、公開用の「プロジェクトID」が発行されます。「Nostrに公開」を押すとリレーに告知イベントが飛び、ホーム画面の最新一覧に載ります。</p>
+      <input type="file" id="fileInput" accept=".sb3">
+      <input type="text" id="titleInput" placeholder="プロジェクトのタイトル">
+      <div class="row">
+        <button id="uploadBtn" disabled>Podへアップロード</button>
+        <button id="publishBtn" disabled>Nostrに公開</button>
+      </div>
+      <div id="uploadStatus" class="status"></div>
+    </section>
+
+    <section class="panel" id="playerPanel" hidden>
+      <h2 id="playerTitle">再生中</h2>
+      <div class="tw-frame-wrap">
+        <iframe id="twFrame" class="tw-frame" allow="autoplay; fullscreen" allowfullscreen></iframe>
+      </div>
+      <p class="hint">Project ID: <code id="playerId"></code></p>
+      <button id="closePlayer">閉じる</button>
+    </section>
+
+    <section class="panel">
+      <h2>2. 最新のプロジェクト一覧（Nostrから取得）</h2>
+      <div class="row">
+        <button id="refreshBtn">更新</button>
+        <span id="relayStatus" class="hint"></span>
+      </div>
+      <ul id="projectList" class="projectList"></ul>
+    </section>
+  </main>
+
+  <footer class="foot">
+    <p>Solid Podに実データを保存し、Nostrで存在を告知し、TurboWarpで実行する仕組みです。詳細は <a href="./README.md">README</a> を参照してください。</p>
+  </footer>
+
+  <script type="module" src="./app.js"></script>
+</body>
+</html>
