@@ -126,19 +126,23 @@ uploadBtn.addEventListener("click", async () => {
 });
 
 async function getPodRoot() {
-  console.log(session.info);
-  // WebIDプロファイルからPodのルートを推定(多くの場合 webIdのオリジン + "/")
-  const webId = session.info.webId;
-  const url = new URL(webId);
-  const res = await solidFetch(webId, {
+    const res = await solidFetch(session.info.webId, {
         headers: {
-            Accept: "text/turtle"
-        }
+            Accept: "text/turtle",
+        },
     });
 
-  const ttl = await res.text();
-  console.log(ttl);
-  return url.origin + "/";
+    const ttl = await res.text();
+
+    const m = ttl.match(
+        /<http:\/\/www\.w3\.org\/ns\/pim\/space#storage>\s*<([^>]+)>/
+    );
+
+    if (!m) {
+        throw new Error("Pod Storageが見つかりません");
+    }
+
+    return m[1];
 }
 
 async function ensureContainer(containerUrl) {
