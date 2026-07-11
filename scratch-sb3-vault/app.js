@@ -15,6 +15,7 @@ import {
   saveFileInContainer,
   getSourceUrl,
   overwriteFile,
+  universalAccess,
 } from "https://esm.sh/@inrupt/solid-client@2?bundle";
 
 import {
@@ -110,7 +111,19 @@ uploadBtn.addEventListener("click", async () => {
       contentType: "application/octet-stream",
       fetch: solidFetch,
     });
+const access = await universalAccess.setPublicAccess(
+  targetUrl,
+  {
+    read: true,
+    write: false,
+    append: false,
+  },
+  {
+    fetch: solidFetch,
+  }
+);
 
+console.log("Public access:", access);
     lastSavedFileUrl = targetUrl;
     lastProjectId = projectId;
     titleInput.dataset.savedTitle = title;
