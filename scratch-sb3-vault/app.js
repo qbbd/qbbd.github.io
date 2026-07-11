@@ -126,6 +126,7 @@ uploadBtn.addEventListener("click", async () => {
 });
 
 async function getPodRoot() {
+  console.log(session.info);
   // WebIDプロファイルからPodのルートを推定(多くの場合 webIdのオリジン + "/")
   const webId = session.info.webId;
   const url = new URL(webId);
