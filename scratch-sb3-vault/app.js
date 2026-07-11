@@ -130,6 +130,14 @@ async function getPodRoot() {
   // WebIDプロファイルからPodのルートを推定(多くの場合 webIdのオリジン + "/")
   const webId = session.info.webId;
   const url = new URL(webId);
+  const res = await solidFetch(webId, {
+        headers: {
+            Accept: "text/turtle"
+        }
+    });
+
+  const ttl = await res.text();
+  console.log(ttl);
   return url.origin + "/";
 }
 
