@@ -303,6 +303,9 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   let events = new Map(); // id -> event
   let profiles = new Map(); // pubkey -> {name, picture}
   let profileReqSent = new Set();
+  let renderScheduled = false;
+  let pendingProfilePubkeys = new Set();
+  let profileBatchTimer = null;
   let pubkey = null;
   let mode = null; // "extension" | "guest"
   let guestSecretKey = null; // Uint8Array, in-memory only
@@ -475,7 +478,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     const m = reactions.get(targetId);
     if (m.has(ev.pubkey)) return; // 同じ人の重複いいねは無視
     m.set(ev.pubkey, ev);
-    renderAll();
+    scheduleRender();
   }
 
   function likeCount(eventId) {
@@ -702,12 +705,17 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
           if (ev.kind === 1) {
             if (!events.has(ev.id)) {
               events.set(ev.id, ev);
-              requestProfile(ev.pubkey, ws);
-              renderAll();
+              queueProfileRequest(ev.pubkey);
+              scheduleRender();
             }
           } else if (ev.kind === 7) {
             addReaction(ev);
           }
+        } else if (data[0] === "EOSE") {
+          // 初期の一括流し込みが終わった時点で確実に一度描画する
+          if (profileBatchTimer) { clearTimeout(profileBatchTimer); profileBatchTimer = null; }
+          flushProfileRequests();
+          scheduleRender(true);
         }
       };
 
@@ -721,13 +729,43 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     });
   }
 
-  function requestProfile(pk, ws) {
-    if (profileReqSent.has(pk)) return;
-    profileReqSent.add(pk);
+  function queueProfileRequest(pk) {
+    if (profileReqSent.has(pk) || pendingProfilePubkeys.has(pk)) return;
+    pendingProfilePubkeys.add(pk);
+    if (profileBatchTimer) return;
+    profileBatchTimer = setTimeout(() => {
+      profileBatchTimer = null;
+      flushProfileRequests();
+    }, 150);
+  }
+
+  function flushProfileRequests() {
+    if (pendingProfilePubkeys.size === 0) return;
+    const authors = Array.from(pendingProfilePubkeys);
+    pendingProfilePubkeys.clear();
+    authors.forEach(pk => profileReqSent.add(pk));
     const subId = "profile-" + Math.random().toString(36).slice(2);
-    try {
-      ws.send(JSON.stringify(["REQ", subId, { kinds: [0], authors: [pk], limit: 1 }]));
-    } catch (e) {}
+    const req = JSON.stringify(["REQ", subId, { kinds: [0], authors: authors, limit: authors.length }]);
+    sockets.forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        try { ws.send(req); } catch (e) {}
+      }
+    });
+  }
+
+  // 短時間に複数イベントが届いても、まとめて1回だけ再描画する(初期流し込み対策)
+  function scheduleRender(immediate) {
+    if (immediate) {
+      renderScheduled = false;
+      renderAll();
+      return;
+    }
+    if (renderScheduled) return;
+    renderScheduled = true;
+    requestAnimationFrame(() => {
+      renderScheduled = false;
+      renderAll();
+    });
   }
 
   // separately listen for kind 0 on all sockets
@@ -744,7 +782,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
               name: meta.name || meta.display_name || shortPub(data[2].pubkey),
               picture: meta.picture || null
             });
-            renderAll();
+            scheduleRender();
           } catch (e) {}
         }
       });
@@ -1051,6 +1089,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     if (val) {
       currentTag = val;
       profileReqSent.clear();
+      pendingProfilePubkeys.clear();
+      if (profileBatchTimer) { clearTimeout(profileBatchTimer); profileBatchTimer = null; }
       connectAll();
       setTimeout(attachProfileListener, 300);
     }
