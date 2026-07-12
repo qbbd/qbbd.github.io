@@ -518,12 +518,11 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       } else {
         signed = finalizeEvent(unsigned, guestSecretKey);
       }
-      sockets.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(["EVENT", signed]));
-        }
-      });
+      const sentCount = await broadcastEvent(signed);
       addReaction(signed);
+      if (sentCount === 0) {
+        alert("⚠️ どのリレーにも接続できていないため、いいねが保存されていない可能性があります。ネットワーク状況を確認してください。");
+      }
     } catch (e) {
       alert("いいねの送信に失敗しました: " + e.message);
     }
@@ -674,6 +673,35 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     } else {
       powRelayReqEl.style.display = "none";
     }
+  }
+
+  // 少なくとも1つのリレーに届くまで待ってから送信する(接続確立前の投稿ロストを防ぐ)
+  function broadcastEvent(signed, { timeoutMs = 4000 } = {}) {
+    return new Promise((resolve) => {
+      const payload = JSON.stringify(["EVENT", signed]);
+      const trySend = () => {
+        const openSockets = sockets.filter(ws => ws.readyState === WebSocket.OPEN);
+        openSockets.forEach(ws => {
+          try { ws.send(payload); } catch (e) {}
+        });
+        return openSockets.length;
+      };
+
+      let sent = trySend();
+      if (sent > 0) {
+        resolve(sent);
+        return;
+      }
+
+      const start = Date.now();
+      const interval = setInterval(() => {
+        sent = trySend();
+        if (sent > 0 || Date.now() - start > timeoutMs) {
+          clearInterval(interval);
+          resolve(sent);
+        }
+      }, 200);
+    });
   }
 
   function connectAll() {
@@ -1104,17 +1132,16 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       } else {
         signed = finalizeEvent(eventToSign, guestSecretKey);
       }
-      sockets.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(["EVENT", signed]));
-        }
-      });
+      const sentCount = await broadcastEvent(signed);
       events.set(signed.id, signed);
       cancelReply();
       renderAll();
       composeText.value = "";
       lastPostAt = Date.now();
       startCooldownCountdown(Math.ceil(POST_COOLDOWN_MS / 1000));
+      if (sentCount === 0) {
+        alert("⚠️ どのリレーにも接続できていないため、この投稿は保存されていない可能性があります。再読み込み後に消えていたら再度投稿してください。");
+      }
     } catch (e) {
       alert("投稿に失敗しました: " + e.message);
       sendBtn.disabled = false;
@@ -1190,18 +1217,18 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       } else {
         signed = finalizeEvent(unsigned, guestSecretKey);
       }
-      sockets.forEach(ws => {
-        if (ws.readyState === WebSocket.OPEN) {
-          ws.send(JSON.stringify(["EVENT", signed]));
-        }
-      });
+      const sentCount = await broadcastEvent(signed);
       profiles.set(pubkey, {
         name: name || shortPub(pubkey),
         picture: picture || null
       });
       renderAll();
-      profileSaveStatus.textContent = "✅ 保存しました";
-      setTimeout(() => { profileSaveStatus.textContent = ""; }, 2000);
+      if (sentCount > 0) {
+        profileSaveStatus.textContent = "✅ 保存しました";
+      } else {
+        profileSaveStatus.textContent = "⚠️ リレーに届いていない可能性があります";
+      }
+      setTimeout(() => { profileSaveStatus.textContent = ""; }, 3000);
     } catch (e) {
       profileSaveStatus.textContent = "";
       alert("プロフィールの配信に失敗しました: " + e.message);
