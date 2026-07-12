@@ -595,6 +595,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
         try { data = JSON.parse(msg.data); } catch (e) { return; }
         if (data[0] === "EVENT") {
           const ev = data[2];
+          if (ev.kind !== 1) return; // kind0(プロフィール)などをチャットに混入させない
           if (!events.has(ev.id)) {
             events.set(ev.id, ev);
             requestProfile(ev.pubkey, ws);
