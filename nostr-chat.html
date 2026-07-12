@@ -207,6 +207,25 @@
                   </label>
                 </div>
 
+                <div id="profile-edit" style="display:none;padding:10px 16px;border-bottom:1px solid #e5e5e5;font-size:12px;">
+                  <details>
+                    <summary style="cursor:pointer;color:#575e75;">プロフィール(名前・アイコン)を編集</summary>
+                    <div style="display:flex;flex-direction:column;gap:6px;margin-top:8px;">
+                      <label>表示名:
+                        <input id="profile-name-input" type="text" placeholder="表示名" style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:6px;">
+                      </label>
+                      <label>アイコン画像URL:
+                        <input id="profile-picture-input" type="text" placeholder="https://..." style="width:100%;padding:4px 6px;border:1px solid #ccc;border-radius:6px;">
+                      </label>
+                      <div style="display:flex;align-items:center;gap:8px;">
+                        <img id="profile-preview" src="" style="display:none;width:32px;height:32px;border-radius:50%;object-fit:cover;">
+                        <button id="profile-save-btn" style="padding:4px 14px;border-radius:14px;border:1px solid #4d97ff;background:#fff;color:#4d97ff;cursor:pointer;">保存して配信</button>
+                        <span id="profile-save-status" style="color:#909090;"></span>
+                      </div>
+                    </div>
+                  </details>
+                </div>
+
                 <div class="compose-box">
                   <textarea id="compose-text" placeholder="ログインしてメッセージを入力..." disabled></textarea>
                   <div class="compose-row">
@@ -304,6 +323,12 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   const powRelayReqEl = document.getElementById("pow-relay-req");
   const powFilterCheckbox = document.getElementById("pow-filter-checkbox");
   const powFilterMinSelect = document.getElementById("pow-filter-min");
+  const profileEditWrapper = document.getElementById("profile-edit");
+  const profileNameInput = document.getElementById("profile-name-input");
+  const profilePictureInput = document.getElementById("profile-picture-input");
+  const profilePreview = document.getElementById("profile-preview");
+  const profileSaveBtn = document.getElementById("profile-save-btn");
+  const profileSaveStatus = document.getElementById("profile-save-status");
 
   const BLOCK_COOKIE_NAME = "nostr_blocked_pubkeys";
   const GUEST_CREATE_COOKIE_NAME = "nostr_guest_last_created";
@@ -674,6 +699,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       loginBtn.disabled = true;
       guestBtn.disabled = true;
       guestNotice.style.display = "none";
+      showProfileEditor();
     } catch (e) {
       alert("ログインに失敗しました: " + e.message);
     }
@@ -707,6 +733,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     loginBtn.disabled = true;
     guestNotice.style.display = "block";
     guestCookieCheckbox.disabled = true;
+    showProfileEditor();
   }
 
   function tryRestoreGuestFromCookie() {
@@ -799,6 +826,78 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       }
     }, 1000);
   }
+
+  function showProfileEditor() {
+    profileEditWrapper.style.display = "block";
+    const existing = profiles.get(pubkey);
+    if (existing) {
+      profileNameInput.value = existing.name || "";
+      profilePictureInput.value = existing.picture || "";
+      if (existing.picture) {
+        profilePreview.src = existing.picture;
+        profilePreview.style.display = "inline-block";
+      }
+    }
+  }
+
+  profilePictureInput.addEventListener("input", () => {
+    const url = profilePictureInput.value.trim();
+    if (url) {
+      profilePreview.src = url;
+      profilePreview.style.display = "inline-block";
+    } else {
+      profilePreview.style.display = "none";
+    }
+  });
+
+  async function saveProfile() {
+    if (!pubkey || !mode) return;
+    const name = profileNameInput.value.trim();
+    const picture = profilePictureInput.value.trim();
+
+    const content = JSON.stringify({
+      name: name || undefined,
+      picture: picture || undefined
+    });
+
+    const unsigned = {
+      kind: 0,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [],
+      content: content,
+      pubkey: pubkey
+    };
+
+    profileSaveBtn.disabled = true;
+    profileSaveStatus.textContent = "配信中...";
+    try {
+      let signed;
+      if (mode === "extension") {
+        signed = await window.nostr.signEvent(unsigned);
+      } else {
+        signed = finalizeEvent(unsigned, guestSecretKey);
+      }
+      sockets.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(["EVENT", signed]));
+        }
+      });
+      profiles.set(pubkey, {
+        name: name || shortPub(pubkey),
+        picture: picture || null
+      });
+      renderAll();
+      profileSaveStatus.textContent = "✅ 保存しました";
+      setTimeout(() => { profileSaveStatus.textContent = ""; }, 2000);
+    } catch (e) {
+      profileSaveStatus.textContent = "";
+      alert("プロフィールの配信に失敗しました: " + e.message);
+    } finally {
+      profileSaveBtn.disabled = false;
+    }
+  }
+
+  profileSaveBtn.addEventListener("click", saveProfile);
 
   loginBtn.addEventListener("click", login);
   guestBtn.addEventListener("click", loginAsGuest);
