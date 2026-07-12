@@ -306,6 +306,10 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   let renderScheduled = false;
   let pendingProfilePubkeys = new Set();
   let profileBatchTimer = null;
+  let isLoadingMore = false;
+  let noMoreOlder = false;
+  const PAGE_SIZE_FIRST = 160;
+  const PAGE_SIZE_MORE = 80;
   let pubkey = null;
   let mode = null; // "extension" | "guest"
   let guestSecretKey = null; // Uint8Array, in-memory only
@@ -676,6 +680,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     sockets.forEach(s => { try { s.close(); } catch (e) {} });
     sockets = [];
     events.clear();
+    noMoreOlder = false;
+    isLoadingMore = false;
     listEl.innerHTML = '<div class="empty-state">読み込み中...</div>';
     countEl.textContent = "メッセージ 0件";
 
@@ -693,7 +699,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
         connectedCount++;
         setStatus("接続済み (" + connectedCount + "/" + RELAYS.length + ")", "connected");
         const subId = "chat-" + Math.random().toString(36).slice(2);
-        const req = ["REQ", subId, { kinds: [1, 7], "#t": [currentTag], limit: 200 }];
+        const req = ["REQ", subId, { kinds: [1, 7], "#t": [currentTag], limit: PAGE_SIZE_FIRST }];
         ws.send(JSON.stringify(req));
       };
 
@@ -728,6 +734,84 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       };
     });
   }
+
+  function loadMoreIndicatorHtml() {
+    if (noMoreOlder) return '<div class="empty-state" style="padding:12px;">これ以上過去の投稿はありません</div>';
+    return '<div id="load-more-indicator" class="empty-state" style="padding:12px;">' + (isLoadingMore ? "読み込み中..." : "") + '</div>';
+  }
+
+  function oldestLoadedTimestamp() {
+    let min = Infinity;
+    events.forEach(ev => { if (ev.created_at < min) min = ev.created_at; });
+    return min === Infinity ? null : min;
+  }
+
+  function loadOlderMessages() {
+    if (isLoadingMore || noMoreOlder) return;
+    const until = oldestLoadedTimestamp();
+    if (until === null) return;
+
+    isLoadingMore = true;
+    scheduleRender(true);
+
+    let received = 0;
+    const subId = "chat-more-" + Math.random().toString(36).slice(2);
+    const req = JSON.stringify(["REQ", subId, { kinds: [1, 7], "#t": [currentTag], until: until - 1, limit: PAGE_SIZE_MORE }]);
+    let pendingEOSE = 0;
+
+    sockets.forEach(ws => {
+      if (ws.readyState === WebSocket.OPEN) {
+        pendingEOSE++;
+        try { ws.send(req); } catch (e) {}
+      }
+    });
+
+    let finishedRelays = 0;
+    const checkDone = () => {
+      finishedRelays++;
+      if (finishedRelays >= pendingEOSE) {
+        isLoadingMore = false;
+        if (received === 0) noMoreOlder = true;
+        scheduleRender(true);
+      }
+    };
+
+    sockets.forEach(ws => {
+      if (ws.readyState !== WebSocket.OPEN) return;
+      const handler = (msg) => {
+        let data;
+        try { data = JSON.parse(msg.data); } catch (e) { return; }
+        if (data[1] !== subId) return;
+        if (data[0] === "EVENT" && data[2].kind === 1) {
+          received++;
+        } else if (data[0] === "EOSE") {
+          ws.removeEventListener("message", handler);
+          checkDone();
+        }
+      };
+      ws.addEventListener("message", handler);
+    });
+
+    if (pendingEOSE === 0) {
+      isLoadingMore = false;
+    }
+
+    // 念のためのタイムアウト(リレー無応答対策)
+    setTimeout(() => {
+      if (isLoadingMore) {
+        isLoadingMore = false;
+        scheduleRender(true);
+      }
+    }, 8000);
+  }
+
+  function isNearBottom() {
+    return window.innerHeight + window.scrollY >= document.body.scrollHeight - 400;
+  }
+
+  window.addEventListener("scroll", () => {
+    if (isNearBottom()) loadOlderMessages();
+  });
 
   function queueProfileRequest(pk) {
     if (profileReqSent.has(pk) || pendingProfilePubkeys.has(pk)) return;
@@ -789,66 +873,120 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     });
   }
 
+  function renderCommentHtml(ev, isReply) {
+    const prof = profiles.get(ev.pubkey);
+    const name = prof ? prof.name : shortPub(ev.pubkey);
+    const pic = prof && prof.picture ? prof.picture : avatarUrl(ev.pubkey);
+    const isSelf = ev.pubkey === pubkey;
+    const count = likeCount(ev.id);
+    const liked = hasLiked(ev.id);
+
+    let replyToHtml = "";
+    if (isReply) {
+      const targetId = getTargetEventId({ tags: ev.tags.filter(t => t[0] === "e") });
+      const parent = targetId ? events.get(targetId) : null;
+      if (parent) {
+        const parentProf = profiles.get(parent.pubkey);
+        const parentName = parentProf ? parentProf.name : shortPub(parent.pubkey);
+        replyToHtml = `<a href="/users/${escapeHTML(parentName)}">@${escapeHTML(parentName)}</a> `;
+      }
+    }
+
+    return `
+    <div class="flex-row comment" id="comments-${ev.id}">
+      <a href="#">
+        <div class="avatar-wrapper">
+          <img class="avatar" src="${pic}" onerror="this.src='${avatarUrl(ev.pubkey)}'">
+        </div>
+      </a>
+      <div class="flex-row comment-body column">
+        <div class="flex-row comment-top-row">
+          <a class="username" href="#">${escapeHTML(name)}</a>
+          ${isSelf ? "" : `<button class="block-btn" onclick="__handleBlockClick('${ev.pubkey}')" title="このユーザーをブロック">🚫ブロック</button>`}
+        </div>
+        <div class="comment-bubble">
+          <span class="comment-content">
+            ${replyToHtml}<span class="emoji-text-rendered">${renderContent(ev.content)}</span>
+          </span>
+          <div class="flex-row comment-bottom-row" style="gap:10px;">
+            <span class="comment-time">${formatTime(ev.created_at)}</span>
+            <button class="block-btn" style="opacity:1;color:${liked ? "#e0245e" : "#909090"};" onclick="__handleLikeClick('${ev.id}')" ${liked ? "disabled" : ""} title="いいね">
+              ${liked ? "❤️" : "🤍"} ${count > 0 ? count : ""}
+            </button>
+            <button class="block-btn" style="opacity:1;color:#4d97ff;" onclick="__handleReplyClick('${ev.id}')" title="返信">
+              💬 返信
+            </button>
+          </div>
+        </div>
+      </div>
+    </div>`;
+  }
+
+  function renderThreadHtml(root, replies) {
+    const repliesHtml = replies.length > 0
+      ? `<div class="flex-row replies column">${replies.map(r => renderCommentHtml(r, true)).join("")}</div>`
+      : "";
+    return `<div class="flex-row comment-container">${renderCommentHtml(root, false)}${repliesHtml}</div>`;
+  }
+
   function renderAll() {
     const filterEnabled = powFilterCheckbox.checked;
     const filterMin = parseInt(powFilterMinSelect.value, 10) || 0;
-    const sorted = Array.from(events.values())
-      .filter(ev => !blockedPubkeys.has(ev.pubkey))
-      .filter(ev => !filterEnabled || leadingZeroBits(ev.id) >= filterMin)
-      .sort((a, b) => b.created_at - a.created_at);
-    countEl.textContent = "メッセージ " + sorted.length + "件";
-    if (sorted.length === 0) {
+    const passesFilter = ev => !blockedPubkeys.has(ev.pubkey) && (!filterEnabled || leadingZeroBits(ev.id) >= filterMin);
+
+    const allKind1 = Array.from(events.values()).filter(passesFilter);
+    const byId = new Map(allKind1.map(e => [e.id, e]));
+
+    function getRootId(ev) {
+      let curId = getTargetEventId({ tags: ev.tags.filter(t => t[0] === "e") });
+      if (!curId) return ev.id;
+      let guard = 0;
+      while (guard < 20) {
+        const parent = byId.get(curId);
+        if (!parent) break;
+        const parentTarget = getTargetEventId({ tags: parent.tags.filter(t => t[0] === "e") });
+        if (!parentTarget) break;
+        curId = parentTarget;
+        guard++;
+      }
+      return curId;
+    }
+
+    const rootBuckets = new Map(); // rootId -> { root, replies: [] }
+    const standalone = [];
+
+    allKind1.forEach(ev => {
+      const directTarget = getTargetEventId({ tags: ev.tags.filter(t => t[0] === "e") });
+      if (!directTarget) {
+        if (!rootBuckets.has(ev.id)) rootBuckets.set(ev.id, { root: ev, replies: [] });
+        else rootBuckets.get(ev.id).root = ev;
+        return;
+      }
+      const rid = getRootId(ev);
+      if (byId.has(rid)) {
+        if (!rootBuckets.has(rid)) rootBuckets.set(rid, { root: byId.get(rid), replies: [] });
+        rootBuckets.get(rid).replies.push(ev);
+      } else {
+        standalone.push(ev); // 返信先が未読み込み(過去ログ側)の場合は単独投稿として表示
+      }
+    });
+
+    const threads = Array.from(rootBuckets.values()).filter(t => t.root);
+    threads.forEach(t => t.replies.sort((a, b) => a.created_at - b.created_at));
+
+    const items = threads.map(t => ({ sortTime: t.root.created_at, html: () => renderThreadHtml(t.root, t.replies) }))
+      .concat(standalone.map(ev => ({ sortTime: ev.created_at, html: () => renderThreadHtml(ev, []) })));
+
+    items.sort((a, b) => b.sortTime - a.sortTime);
+
+    countEl.textContent = "メッセージ " + allKind1.length + "件";
+
+    if (items.length === 0) {
       listEl.innerHTML = '<div class="empty-state">まだメッセージがありません</div>';
       return;
     }
-    listEl.innerHTML = sorted.map(ev => {
-      const prof = profiles.get(ev.pubkey);
-      const name = prof ? prof.name : shortPub(ev.pubkey);
-      const pic = prof && prof.picture ? prof.picture : avatarUrl(ev.pubkey);
-      const isSelf = ev.pubkey === pubkey;
 
-      const replyEventId = getTargetEventId({ tags: ev.tags.filter(t => t[0] === "e") });
-      let replyToHtml = "";
-      if (replyEventId) {
-        const parent = events.get(replyEventId);
-        if (parent) {
-          const parentProf = profiles.get(parent.pubkey);
-          const parentName = parentProf ? parentProf.name : shortPub(parent.pubkey);
-          replyToHtml = `<a href="#comments-${parent.id}" class="reply-to-tag" style="font-size:11px;color:#4d97ff;">@${escapeHTML(parentName)} への返信</a>`;
-        }
-      }
-
-      const count = likeCount(ev.id);
-      const liked = hasLiked(ev.id);
-
-      return `
-      <div class="flex-row comment-container">
-        <div class="flex-row comment" id="comments-${ev.id}">
-          <div class="avatar-wrapper">
-            <img class="avatar" src="${pic}" onerror="this.src='${avatarUrl(ev.pubkey)}'">
-          </div>
-          <div class="flex-row comment-body column">
-            <div class="flex-row comment-top-row">
-              <span class="username">${escapeHTML(name)}</span>
-              ${isSelf ? "" : `<button class="block-btn" onclick="__handleBlockClick('${ev.pubkey}')" title="このユーザーをブロック">🚫ブロック</button>`}
-            </div>
-            ${replyToHtml ? `<div>${replyToHtml}</div>` : ""}
-            <div class="comment-bubble">
-              <span class="comment-content">${renderContent(ev.content)}</span>
-              <div class="flex-row comment-bottom-row" style="gap:10px;">
-                <span class="comment-time">${formatTime(ev.created_at)}</span>
-                <button class="block-btn" style="opacity:1;color:${liked ? "#e0245e" : "#909090"};" onclick="__handleLikeClick('${ev.id}')" ${liked ? "disabled" : ""} title="いいね">
-                  ${liked ? "❤️" : "🤍"} ${count > 0 ? count : ""}
-                </button>
-                <button class="block-btn" style="opacity:1;color:#4d97ff;" onclick="__handleReplyClick('${ev.id}')" title="返信">
-                  💬 返信
-                </button>
-              </div>
-            </div>
-          </div>
-        </div>
-      </div>`;
-    }).join("");
+    listEl.innerHTML = items.map(it => it.html()).join("") + loadMoreIndicatorHtml();
   }
 
   async function login() {
