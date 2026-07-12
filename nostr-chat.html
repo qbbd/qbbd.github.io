@@ -235,6 +235,20 @@
                   <strong>ブロック中:</strong> <span id="blocked-list"></span>
                 </div>
 
+                <div class="room-select" style="padding-top:0;border-bottom:1px solid #e5e5e5;">
+                  <label style="display:flex;align-items:center;gap:4px;">
+                    <input type="checkbox" id="pow-filter-checkbox">
+                    PoWを満たさない投稿を表示しない(最低
+                  </label>
+                  <select id="pow-filter-min" style="font-size:12px;">
+                    <option value="8">8bit</option>
+                    <option value="16" selected>16bit</option>
+                    <option value="20">20bit</option>
+                    <option value="24">24bit</option>
+                  </select>
+                  <span>)</span>
+                </div>
+
                 <div id="comments-list">
                   <div class="empty-state">読み込み中...</div>
                 </div>
@@ -288,6 +302,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   const powDifficultySelect = document.getElementById("pow-difficulty");
   const powStatusEl = document.getElementById("pow-status");
   const powRelayReqEl = document.getElementById("pow-relay-req");
+  const powFilterCheckbox = document.getElementById("pow-filter-checkbox");
+  const powFilterMinSelect = document.getElementById("pow-filter-min");
 
   const BLOCK_COOKIE_NAME = "nostr_blocked_pubkeys";
   const GUEST_CREATE_COOKIE_NAME = "nostr_guest_last_created";
@@ -603,8 +619,11 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   }
 
   function renderAll() {
+    const filterEnabled = powFilterCheckbox.checked;
+    const filterMin = parseInt(powFilterMinSelect.value, 10) || 0;
     const sorted = Array.from(events.values())
       .filter(ev => !blockedPubkeys.has(ev.pubkey))
+      .filter(ev => !filterEnabled || leadingZeroBits(ev.id) >= filterMin)
       .sort((a, b) => b.created_at - a.created_at);
     countEl.textContent = "メッセージ " + sorted.length + "件";
     if (sorted.length === 0) {
@@ -784,6 +803,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   loginBtn.addEventListener("click", login);
   guestBtn.addEventListener("click", loginAsGuest);
   sendBtn.addEventListener("click", sendMessage);
+  powFilterCheckbox.addEventListener("change", renderAll);
+  powFilterMinSelect.addEventListener("change", renderAll);
   composeText.addEventListener("keydown", (e) => {
     if (e.key === "Enter" && (e.metaKey || e.ctrlKey)) {
       sendMessage();
