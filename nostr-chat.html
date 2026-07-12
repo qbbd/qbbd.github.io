@@ -227,6 +227,10 @@
                 </div>
 
                 <div class="compose-box">
+                  <div id="reply-banner" class="flex-row" style="display:none;align-items:center;gap:8px;font-size:12px;color:#4d97ff;background:#eef4ff;padding:4px 8px;border-radius:6px;">
+                    <span class="reply-banner-text"></span>
+                    <button id="reply-cancel-btn" style="background:none;border:none;color:#4d97ff;cursor:pointer;font-size:12px;">✕ 取消</button>
+                  </div>
                   <textarea id="compose-text" placeholder="ログインしてメッセージを入力..." disabled></textarea>
                   <div class="compose-row">
                     <span id="login-status" style="font-size:12px;color:#909090;">未ログイン</span>
@@ -303,6 +307,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   let mode = null; // "extension" | "guest"
   let guestSecretKey = null; // Uint8Array, in-memory only
   let blockedPubkeys = new Set();
+  let reactions = new Map(); // targetEventId -> Map(reactorPubkey -> reactionEvent)
+  let replyTarget = null; // { id, pubkey, name } | null
 
   const listEl = document.getElementById("comments-list");
   const statusPill = document.getElementById("status-pill");
@@ -329,6 +335,8 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
   const profilePreview = document.getElementById("profile-preview");
   const profileSaveBtn = document.getElementById("profile-save-btn");
   const profileSaveStatus = document.getElementById("profile-save-status");
+  const replyBannerEl = document.getElementById("reply-banner");
+  document.getElementById("reply-cancel-btn").addEventListener("click", cancelReply);
 
   const BLOCK_COOKIE_NAME = "nostr_blocked_pubkeys";
   const GUEST_CREATE_COOKIE_NAME = "nostr_guest_last_created";
@@ -454,10 +462,106 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
     });
   }
 
+  function getTargetEventId(reactionEvent) {
+    const eTags = reactionEvent.tags.filter(t => t[0] === "e");
+    if (eTags.length === 0) return null;
+    return eTags[eTags.length - 1][1]; // NIP-25: 最後のeタグが対象
+  }
+
+  function addReaction(ev) {
+    const targetId = getTargetEventId(ev);
+    if (!targetId) return;
+    if (!reactions.has(targetId)) reactions.set(targetId, new Map());
+    const m = reactions.get(targetId);
+    if (m.has(ev.pubkey)) return; // 同じ人の重複いいねは無視
+    m.set(ev.pubkey, ev);
+    renderAll();
+  }
+
+  function likeCount(eventId) {
+    const m = reactions.get(eventId);
+    return m ? m.size : 0;
+  }
+
+  function hasLiked(eventId) {
+    if (!pubkey) return false;
+    const m = reactions.get(eventId);
+    return m ? m.has(pubkey) : false;
+  }
+
+  async function sendLike(targetEvent) {
+    if (!pubkey || !mode) {
+      alert("いいねするにはログイン(拡張機能またはゲスト)が必要です。");
+      return;
+    }
+    if (hasLiked(targetEvent.id)) return;
+
+    const unsigned = {
+      kind: 7,
+      created_at: Math.floor(Date.now() / 1000),
+      tags: [["e", targetEvent.id], ["p", targetEvent.pubkey], ["t", currentTag]],
+      content: "+",
+      pubkey: pubkey
+    };
+
+    try {
+      let signed;
+      if (mode === "extension") {
+        signed = await window.nostr.signEvent(unsigned);
+      } else {
+        signed = finalizeEvent(unsigned, guestSecretKey);
+      }
+      sockets.forEach(ws => {
+        if (ws.readyState === WebSocket.OPEN) {
+          ws.send(JSON.stringify(["EVENT", signed]));
+        }
+      });
+      addReaction(signed);
+    } catch (e) {
+      alert("いいねの送信に失敗しました: " + e.message);
+    }
+  }
+
+  function startReply(eventId) {
+    const ev = events.get(eventId);
+    if (!ev) return;
+    const prof = profiles.get(ev.pubkey);
+    replyTarget = {
+      id: ev.id,
+      pubkey: ev.pubkey,
+      name: prof ? prof.name : shortPub(ev.pubkey)
+    };
+    updateReplyBanner();
+    composeText.focus();
+  }
+
+  function cancelReply() {
+    replyTarget = null;
+    updateReplyBanner();
+  }
+
+  function updateReplyBanner() {
+    if (replyTarget) {
+      replyBannerEl.style.display = "flex";
+      replyBannerEl.querySelector(".reply-banner-text").textContent = "@" + replyTarget.name + " への返信";
+    } else {
+      replyBannerEl.style.display = "none";
+    }
+  }
+
   window.__handleBlockClick = function (pk) {
     if (confirm("このユーザーの投稿を今後表示しないようにしますか？")) {
       blockUser(pk);
     }
+  };
+
+  window.__handleLikeClick = function (eventId) {
+    const ev = events.get(eventId);
+    if (ev) sendLike(ev);
+  };
+
+  window.__handleReplyClick = function (eventId) {
+    startReply(eventId);
   };
 
   function leadingZeroBits(hex) {
@@ -586,7 +690,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
         connectedCount++;
         setStatus("接続済み (" + connectedCount + "/" + RELAYS.length + ")", "connected");
         const subId = "chat-" + Math.random().toString(36).slice(2);
-        const req = ["REQ", subId, { kinds: [1], "#t": [currentTag], limit: 100 }];
+        const req = ["REQ", subId, { kinds: [1, 7], "#t": [currentTag], limit: 200 }];
         ws.send(JSON.stringify(req));
       };
 
@@ -595,11 +699,14 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
         try { data = JSON.parse(msg.data); } catch (e) { return; }
         if (data[0] === "EVENT") {
           const ev = data[2];
-          if (ev.kind !== 1) return; // kind0(プロフィール)などをチャットに混入させない
-          if (!events.has(ev.id)) {
-            events.set(ev.id, ev);
-            requestProfile(ev.pubkey, ws);
-            renderAll();
+          if (ev.kind === 1) {
+            if (!events.has(ev.id)) {
+              events.set(ev.id, ev);
+              requestProfile(ev.pubkey, ws);
+              renderAll();
+            }
+          } else if (ev.kind === 7) {
+            addReaction(ev);
           }
         }
       };
@@ -661,6 +768,21 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
       const name = prof ? prof.name : shortPub(ev.pubkey);
       const pic = prof && prof.picture ? prof.picture : avatarUrl(ev.pubkey);
       const isSelf = ev.pubkey === pubkey;
+
+      const replyEventId = getTargetEventId({ tags: ev.tags.filter(t => t[0] === "e") });
+      let replyToHtml = "";
+      if (replyEventId) {
+        const parent = events.get(replyEventId);
+        if (parent) {
+          const parentProf = profiles.get(parent.pubkey);
+          const parentName = parentProf ? parentProf.name : shortPub(parent.pubkey);
+          replyToHtml = `<a href="#comments-${parent.id}" class="reply-to-tag" style="font-size:11px;color:#4d97ff;">@${escapeHTML(parentName)} への返信</a>`;
+        }
+      }
+
+      const count = likeCount(ev.id);
+      const liked = hasLiked(ev.id);
+
       return `
       <div class="flex-row comment-container">
         <div class="flex-row comment" id="comments-${ev.id}">
@@ -672,10 +794,17 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
               <span class="username">${escapeHTML(name)}</span>
               ${isSelf ? "" : `<button class="block-btn" onclick="__handleBlockClick('${ev.pubkey}')" title="このユーザーをブロック">🚫ブロック</button>`}
             </div>
+            ${replyToHtml ? `<div>${replyToHtml}</div>` : ""}
             <div class="comment-bubble">
               <span class="comment-content">${renderContent(ev.content)}</span>
-              <div class="flex-row comment-bottom-row">
+              <div class="flex-row comment-bottom-row" style="gap:10px;">
                 <span class="comment-time">${formatTime(ev.created_at)}</span>
+                <button class="block-btn" style="opacity:1;color:${liked ? "#e0245e" : "#909090"};" onclick="__handleLikeClick('${ev.id}')" ${liked ? "disabled" : ""} title="いいね">
+                  ${liked ? "❤️" : "🤍"} ${count > 0 ? count : ""}
+                </button>
+                <button class="block-btn" style="opacity:1;color:#4d97ff;" onclick="__handleReplyClick('${ev.id}')" title="返信">
+                  💬 返信
+                </button>
               </div>
             </div>
           </div>
@@ -765,10 +894,16 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
 
     sendBtn.disabled = true;
 
+    const tags = [["t", currentTag]];
+    if (replyTarget) {
+      tags.push(["e", replyTarget.id, "", "reply"]);
+      tags.push(["p", replyTarget.pubkey]);
+    }
+
     const unsigned = {
       kind: 1,
       created_at: Math.floor(Date.now() / 1000),
-      tags: [["t", currentTag]],
+      tags: tags,
       content: content,
       pubkey: pubkey
     };
@@ -799,6 +934,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "ht
         }
       });
       events.set(signed.id, signed);
+      cancelReply();
       renderAll();
       composeText.value = "";
       lastPostAt = Date.now();
