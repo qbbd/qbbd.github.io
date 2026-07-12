@@ -211,8 +211,21 @@
                   <textarea id="compose-text" placeholder="ログインしてメッセージを入力..." disabled></textarea>
                   <div class="compose-row">
                     <span id="login-status" style="font-size:12px;color:#909090;">未ログイン</span>
-                    <button id="send-btn" disabled>投稿</button>
+                    <div style="display:flex;align-items:center;gap:6px;">
+                      <label style="font-size:12px;color:#575e75;">PoW:
+                        <select id="pow-difficulty" style="font-size:12px;">
+                          <option value="0">なし</option>
+                          <option value="8">8bit(軽い)</option>
+                          <option value="16" selected>16bit</option>
+                          <option value="20">20bit</option>
+                          <option value="24">24bit(重い)</option>
+                        </select>
+                      </label>
+                      <button id="send-btn" disabled>投稿</button>
+                    </div>
                   </div>
+                  <div id="pow-relay-req" style="display:none;font-size:11px;color:#575e75;"></div>
+                  <div id="pow-status" style="display:none;font-size:11px;color:#575e75;">⛏️ PoW計算中...</div>
                   <div id="guest-notice" style="display:none;font-size:11px;color:#a67c00;">
                     ゲストモード: 一時的な鍵で投稿します。クッキー保存を選ばない場合、ページを閉じる/再読み込みすると鍵は失われます。
                   </div>
@@ -239,7 +252,7 @@
   </div>
 
 <script type="module">
-import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/nostr-tools@2.7.2/pure";
+import { generateSecretKey, getPublicKey, finalizeEvent, getEventHash } from "https://esm.sh/nostr-tools@2.7.2/pure";
 
 (function () {
   const RELAYS = [
@@ -272,8 +285,16 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
   const roomApplyBtn = document.getElementById("room-apply-btn");
   const blockedListWrapper = document.getElementById("blocked-list-wrapper");
   const blockedListEl = document.getElementById("blocked-list");
+  const powDifficultySelect = document.getElementById("pow-difficulty");
+  const powStatusEl = document.getElementById("pow-status");
+  const powRelayReqEl = document.getElementById("pow-relay-req");
 
   const BLOCK_COOKIE_NAME = "nostr_blocked_pubkeys";
+  const GUEST_CREATE_COOKIE_NAME = "nostr_guest_last_created";
+  const GUEST_CREATE_COOLDOWN_MS = 5 * 60 * 1000; // 5分
+  const POST_COOLDOWN_MS = 5 * 1000; // 5秒
+  let lastPostAt = 0;
+  let postCooldownTimer = null;
 
   const COOKIE_NAME = "nostr_guest_sk";
 
@@ -397,6 +418,111 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
       blockUser(pk);
     }
   };
+
+  function leadingZeroBits(hex) {
+    let bits = 0;
+    for (let i = 0; i < hex.length; i++) {
+      const nibble = parseInt(hex[i], 16);
+      if (nibble === 0) {
+        bits += 4;
+      } else {
+        bits += Math.clz32(nibble) - 28;
+        break;
+      }
+    }
+    return bits;
+  }
+
+  function mineEvent(baseEvent, difficulty, onProgress) {
+    return new Promise((resolve, reject) => {
+      if (difficulty <= 0) {
+        resolve(baseEvent);
+        return;
+      }
+      let nonce = 0;
+      const tags = baseEvent.tags.filter(t => t[0] !== "nonce");
+      const nonceTagIndex = tags.length;
+      tags.push(["nonce", "0", String(difficulty)]);
+      const candidate = { ...baseEvent, tags };
+
+      function step() {
+        const batchStart = nonce;
+        for (let i = 0; i < 800; i++) {
+          candidate.tags[nonceTagIndex][1] = String(nonce);
+          const id = getEventHash(candidate);
+          if (leadingZeroBits(id) >= difficulty) {
+            resolve(candidate);
+            return;
+          }
+          nonce++;
+        }
+        onProgress(nonce);
+        setTimeout(step, 0);
+      }
+      step();
+    });
+  }
+
+  let detectedMinPow = 0;
+
+  function relayHttpUrl(wsUrl) {
+    return wsUrl.replace(/^wss:\/\//, "https://").replace(/^ws:\/\//, "http://");
+  }
+
+  async function fetchRelayInfo(wsUrl) {
+    try {
+      const res = await fetch(relayHttpUrl(wsUrl), {
+        headers: { "Accept": "application/nostr+json" }
+      });
+      if (!res.ok) return null;
+      const info = await res.json();
+      return info;
+    } catch (e) {
+      return null; // CORS未対応や取得失敗は無視
+    }
+  }
+
+  async function detectMinPowAcrossRelays() {
+    const results = await Promise.all(RELAYS.map(fetchRelayInfo));
+    let maxMin = 0;
+    const perRelay = [];
+    results.forEach((info, i) => {
+      const val = info && info.limitation && typeof info.limitation.min_pow_difficulty === "number"
+        ? info.limitation.min_pow_difficulty
+        : 0;
+      perRelay.push({ relay: RELAYS[i], min: val, ok: info !== null });
+      if (val > maxMin) maxMin = val;
+    });
+    detectedMinPow = maxMin;
+    applyMinPowToUI(perRelay);
+  }
+
+  function applyMinPowToUI(perRelay) {
+    // 既存の選択肢のうち検出した最低難易度未満は無効化
+    Array.from(powDifficultySelect.options).forEach(opt => {
+      const v = parseInt(opt.value, 10);
+      opt.disabled = v < detectedMinPow;
+    });
+    // 最低難易度にちょうど合う選択肢がなければ追加
+    if (detectedMinPow > 0 && !Array.from(powDifficultySelect.options).some(o => parseInt(o.value, 10) === detectedMinPow)) {
+      const newOpt = document.createElement("option");
+      newOpt.value = String(detectedMinPow);
+      newOpt.textContent = detectedMinPow + "bit(リレー最低要件)";
+      powDifficultySelect.appendChild(newOpt);
+    }
+    // 現在選択中の値がリレー要件を満たさない場合は自動的に引き上げ
+    if (parseInt(powDifficultySelect.value, 10) < detectedMinPow) {
+      powDifficultySelect.value = String(detectedMinPow);
+    }
+
+    if (detectedMinPow > 0) {
+      const known = perRelay.filter(r => r.ok);
+      powRelayReqEl.style.display = "block";
+      powRelayReqEl.textContent = "⚠️ 接続中のリレーのうち最も厳しいもので " + detectedMinPow + "bit のPoWが必須です(自動検出、" + known.length + "/" + perRelay.length + " リレーから情報取得成功)";
+    } else {
+      powRelayReqEl.style.display = "none";
+    }
+  }
 
   function connectAll() {
     sockets.forEach(s => { try { s.close(); } catch (e) {} });
@@ -535,9 +661,17 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
   }
 
   function loginAsGuest() {
+    const lastCreated = parseInt(getCookie(GUEST_CREATE_COOKIE_NAME) || "0", 10);
+    const elapsed = Date.now() - lastCreated;
+    if (lastCreated && elapsed < GUEST_CREATE_COOLDOWN_MS) {
+      const remainSec = Math.ceil((GUEST_CREATE_COOLDOWN_MS - elapsed) / 1000);
+      alert("新しいゲストアカウントの作成は5分に1回までです。あと" + remainSec + "秒お待ちください。\n(クッキーに保存済みの鍵がある場合は自動的に復元されます)");
+      return;
+    }
     guestSecretKey = generateSecretKey();
     pubkey = getPublicKey(guestSecretKey);
     mode = "guest";
+    setCookie(GUEST_CREATE_COOKIE_NAME, String(Date.now()), 1);
     if (guestCookieCheckbox.checked) {
       setCookie(COOKIE_NAME, bytesToHex(guestSecretKey), 365);
     }
@@ -574,6 +708,14 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
   async function sendMessage() {
     const content = composeText.value.trim();
     if (!content || !pubkey || !mode) return;
+
+    const elapsed = Date.now() - lastPostAt;
+    if (elapsed < POST_COOLDOWN_MS) {
+      const remainSec = Math.ceil((POST_COOLDOWN_MS - elapsed) / 1000);
+      startCooldownCountdown(remainSec);
+      return;
+    }
+
     sendBtn.disabled = true;
 
     const unsigned = {
@@ -584,12 +726,25 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
       pubkey: pubkey
     };
 
+    const difficulty = Math.max(parseInt(powDifficultySelect.value, 10) || 0, detectedMinPow);
+
     try {
+      let eventToSign = unsigned;
+      if (difficulty > 0) {
+        powStatusEl.style.display = "block";
+        powStatusEl.textContent = "⛏️ PoW計算中... (nonce: 0)";
+        eventToSign = await mineEvent(unsigned, difficulty, (nonce) => {
+          powStatusEl.textContent = "⛏️ PoW計算中... (nonce: " + nonce + ")";
+        });
+        powStatusEl.textContent = "✅ PoW完了(" + difficulty + "bit)";
+        setTimeout(() => { powStatusEl.style.display = "none"; }, 1500);
+      }
+
       let signed;
       if (mode === "extension") {
-        signed = await window.nostr.signEvent(unsigned);
+        signed = await window.nostr.signEvent(eventToSign);
       } else {
-        signed = finalizeEvent(unsigned, guestSecretKey);
+        signed = finalizeEvent(eventToSign, guestSecretKey);
       }
       sockets.forEach(ws => {
         if (ws.readyState === WebSocket.OPEN) {
@@ -599,11 +754,31 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
       events.set(signed.id, signed);
       renderAll();
       composeText.value = "";
+      lastPostAt = Date.now();
+      startCooldownCountdown(Math.ceil(POST_COOLDOWN_MS / 1000));
     } catch (e) {
       alert("投稿に失敗しました: " + e.message);
-    } finally {
       sendBtn.disabled = false;
+      powStatusEl.style.display = "none";
     }
+  }
+
+  function startCooldownCountdown(seconds) {
+    if (postCooldownTimer) clearInterval(postCooldownTimer);
+    let remaining = seconds;
+    sendBtn.disabled = true;
+    sendBtn.textContent = remaining + "s";
+    postCooldownTimer = setInterval(() => {
+      remaining -= 1;
+      if (remaining <= 0) {
+        clearInterval(postCooldownTimer);
+        postCooldownTimer = null;
+        sendBtn.disabled = false;
+        sendBtn.textContent = "投稿";
+      } else {
+        sendBtn.textContent = remaining + "s";
+      }
+    }, 1000);
   }
 
   loginBtn.addEventListener("click", login);
@@ -629,6 +804,7 @@ import { generateSecretKey, getPublicKey, finalizeEvent } from "https://esm.sh/n
   tryRestoreGuestFromCookie();
   loadBlockedFromCookie();
   renderBlockedList();
+  detectMinPowAcrossRelays();
 })();
 </script>
 </body>
